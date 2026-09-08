@@ -1,0 +1,433 @@
+import { ListOrdered, MessageSquare, Network, Share2 } from "lucide-react";
+import { open } from "@tauri-apps/plugin-dialog";
+import type {
+  LocalPerformancePreset,
+  LocalModelProfileDto,
+  LocalModelRuntimeStatusDto,
+  LocalModelRuntimeStatusesDto,
+  RemoteApiFormat,
+  RemoteModelProfileDto,
+} from "../types";
+import { useI18n } from "../../../i18n";
+
+type TranslateFn = ReturnType<typeof useI18n>["t"];
+type ModelRoleKey = "chat" | "graph" | "embed" | "rerank";
+type RemoteProtocol = "openai_chat_completions" | "openai_responses";
+type RemoteApiFormatValue = RemoteApiFormat;
+type RemoteProviderPreset = {
+  id: string;
+  label: string;
+  description: string;
+  protocol?: RemoteProtocol | string;
+  apiFormat?: RemoteApiFormatValue | string;
+  profile: Omit<RemoteModelProfileDto, "api_key">;
+};
+
+const REMOTE_PRESET_STORAGE_KEY = "memori-remote-model-presets";
+const REMOTE_PROTOCOL_STORAGE_KEY = "memori-remote-model-protocol";
+const REMOTE_API_FORMAT_STORAGE_KEY = "memori-remote-model-api-format";
+
+const LEGACY_REMOTE_PROTOCOLS: Array<{
+  value: string;
+  label: string;
+  description: string;
+}> = [
+  {
+    value: "openai_compatible",
+    label: "OpenAI-compatible /v1",
+    description: "旧版 OpenAI-compatible 协议标识，读取时会自动迁移为 Chat Completions。"
+  },
+  {
+    value: "openai_responses",
+    label: "OpenAI Response / Chat 兼容",
+    description: "按 OpenAI 风格配置，当前运行时仍使用 chat/completions 兼容调用。"
+  },
+  {
+    value: "ollama_openai",
+    label: "Ollama OpenAI-compatible",
+    description: "适用于 Ollama 的 OpenAI 兼容接口，例如 http://localhost:11434。"
+  },
+  {
+    value: "lmstudio_vllm",
+    label: "LM Studio / vLLM",
+    description: "适用于 LM Studio、vLLM、Xinference 等暴露 OpenAI 兼容接口的服务。"
+  }
+];
+
+const REMOTE_PROTOCOLS: Array<{
+  value: RemoteProtocol;
+  label: string;
+  description: string;
+}> = [
+  {
+    value: "openai_chat_completions",
+    label: "OpenAI Chat Completions",
+    description: "使用 /v1/chat/completions。适合多数 OpenAI 兼容聊天模型接口。"
+  },
+  {
+    value: "openai_responses",
+    label: "OpenAI Responses",
+    description: "使用 /v1/responses。只在远端明确支持 Responses API 时选择。"
+  }
+];
+
+const REMOTE_API_FORMATS: Array<{
+  value: RemoteApiFormatValue;
+  label: string;
+  description: string;
+  tail: "chat/completions" | "responses";
+}> = [
+  {
+    value: "chat",
+    label: "OpenAI",
+    description: "使用 /v1/chat/completions。适合 DeepSeek、OpenAI 兼容服务和多数中转接口。",
+    tail: "chat/completions"
+  },
+  {
+    value: "responses",
+    label: "OpenAI-Response",
+    description: "使用 /v1/responses。仅在服务商明确支持 Responses API 时选择。",
+    tail: "responses"
+  }
+];
+
+function applyRemotePreset(
+  current: RemoteModelProfileDto,
+  preset: RemoteProviderPreset
+): RemoteModelProfileDto {
+  return {
+    ...current,
+    ...preset.profile
+  };
+}
+
+function normalizeRemoteProtocol(value: string | null | undefined): RemoteProtocol {
+  if (
+    value !== "openai_responses" &&
+    LEGACY_REMOTE_PROTOCOLS.some((item) => item.value === value)
+  ) {
+    return "openai_chat_completions";
+  }
+  return REMOTE_PROTOCOLS.some((item) => item.value === value)
+    ? (value as RemoteProtocol)
+    : "openai_chat_completions";
+}
+
+function normalizeRemoteApiFormat(value: string | null | undefined): RemoteApiFormatValue {
+  const normalized = value?.trim().toLowerCase();
+  return normalized === "responses" ||
+    normalized === "response" ||
+    normalized === "openai_responses" ||
+    normalized === "openai-response"
+    ? "responses"
+    : "chat";
+}
+
+function stripOpenAiRequestPath(value: string): string {
+  let next = value.trim();
+  if (next.endsWith("/") || next.endsWith("#")) return next;
+  next = next.replace(/\/v1\/(chat\/completions|responses|embeddings|models)$/i, "");
+  next = next.replace(/\/v1$/i, "");
+  return next;
+}
+
+function normalizeRemoteBaseUrl(value: string): string {
+  return stripOpenAiRequestPath(value);
+}
+
+function buildOpenAiUrl(host: string, tail: string): string {
+  const trimmed = host.trim();
+  const cleanTail = tail.replace(/^\/+/, "");
+  if (trimmed.endsWith("#")) return trimmed.slice(0, -1);
+  if (trimmed.endsWith("/")) return `${trimmed}${cleanTail}`;
+  return `${trimmed.replace(/\/+$/, "")}/v1/${cleanTail}`;
+}
+
+function parseRemotePresets(raw: string | null): RemoteProviderPreset[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((item): item is RemoteProviderPreset =>
+      typeof item?.id === "string" &&
+      typeof item?.label === "string" &&
+      typeof item?.description === "string" &&
+      typeof item?.profile?.chat_endpoint === "string" &&
+      typeof item?.profile?.graph_endpoint === "string" &&
+      typeof item?.profile?.embed_endpoint === "string" &&
+      typeof item?.profile?.chat_model === "string" &&
+      typeof item?.profile?.graph_model === "string" &&
+      typeof item?.profile?.embed_model === "string"
+    );
+  } catch {
+    return [];
+  }
+}
+
+const PERFORMANCE_PRESETS: Array<{
+  value: LocalPerformancePreset;
+  label: string;
+  description: string;
+}> = [
+  {
+    value: "compat",
+    label: "兼容模式",
+    description: "不额外添加激进参数，适合不确定硬件或首次配置。"
+  },
+  {
+    value: "gpu",
+    label: "GPU 加速",
+    description: "尽量把模型层放到显卡，适合显存充足的电脑。"
+  },
+  {
+    value: "low_vram",
+    label: "低显存",
+    description: "降低 batch 并使用较省显存的 KV cache，适合显存紧张。"
+  },
+  {
+    value: "throughput",
+    label: "高吞吐",
+    description: "提高 batch，适合显存较大且希望更快回答。"
+  }
+];
+
+function extractPort(endpoint: string): string {
+  try {
+    const url = new URL(endpoint);
+    return url.port || (url.protocol === "https:" ? "443" : "80");
+  } catch {
+    return "";
+  }
+}
+
+function replacePort(endpoint: string, port: string): string {
+  try {
+    const url = new URL(endpoint);
+    url.port = port;
+    return url.toString().replace(/\/$/, "");
+  } catch {
+    return endpoint;
+  }
+}
+
+function pickModelFile(): Promise<string | null> {
+  return open({
+    multiple: false,
+    filters: [{ name: "GGUF Model", extensions: ["gguf"] }]
+  }).then((selected) =>
+    selected && typeof selected === "string" ? selected : null
+  );
+}
+
+function pickLlamaServerFile(): Promise<string | null> {
+  return open({
+    multiple: false,
+    filters: [{ name: "llama-server", extensions: ["exe", ""] }]
+  }).then((selected) =>
+    selected && typeof selected === "string" ? selected : null
+  );
+}
+
+function fileNameFromPath(path: string): string {
+  return path.split(/[/\\]/).pop() ?? path;
+}
+
+function dirNameFromPath(path: string): string {
+  const name = fileNameFromPath(path);
+  const index = path.lastIndexOf(name);
+  return index > 0 ? path.slice(0, index).replace(/[\\/]$/, "") : "";
+}
+
+function modelPathForRole(profile: LocalModelProfileDto, role: ModelRoleKey): string {
+  if (role === "chat") return profile.chat_model_path ?? "";
+  if (role === "graph") return profile.graph_model_path ?? "";
+  if (role === "rerank") return profile.rerank_model_path ?? "";
+  return profile.embed_model_path ?? "";
+}
+
+function runtimeStatusForRole(
+  statuses: LocalModelRuntimeStatusesDto | null,
+  role: ModelRoleKey
+): LocalModelRuntimeStatusDto | null {
+  return statuses?.roles.find((item) => item.role === role) ?? null;
+}
+
+type RoleErrorMap = Partial<Record<ModelRoleKey, string>>;
+
+function roleEndpoint(profile: LocalModelProfileDto, role: ModelRoleKey): string {
+  if (role === "chat") return profile.chat_endpoint;
+  if (role === "graph") return profile.graph_endpoint;
+  if (role === "rerank") return profile.rerank_endpoint;
+  return profile.embed_endpoint;
+}
+
+function roleModel(profile: LocalModelProfileDto, role: ModelRoleKey): string {
+  if (role === "chat") return profile.chat_model;
+  if (role === "graph") return profile.graph_model;
+  if (role === "rerank") return profile.rerank_model;
+  return profile.embed_model;
+}
+
+function endpointHasUsablePort(endpoint: string): boolean {
+  try {
+    const url = new URL(endpoint);
+    return Boolean(url.port || url.protocol === "http:" || url.protocol === "https:");
+  } catch {
+    return false;
+  }
+}
+
+/** 返回 endpoint 的 host:port 目标标识，用于判断两个角色是否落在同一服务上。 */
+function endpointTarget(endpoint: string): string | null {
+  try {
+    const url = new URL(endpoint.trim());
+    const port = url.port || (url.protocol === "https:" ? "443" : "80");
+    return `${url.hostname.toLowerCase()}:${port}`;
+  } catch {
+    return null;
+  }
+}
+
+function optionalNumber(value: string, min?: number): number | null {
+  if (value.trim() === "") return null;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return null;
+  return min == null ? parsed : Math.max(min, parsed);
+}
+
+function validateLocalRoles(
+  profile: LocalModelProfileDto,
+  roles: readonly ModelRoleKey[]
+): { ok: boolean; roleErrors: RoleErrorMap; generalErrors: string[]; firstRole: ModelRoleKey | null } {
+  const roleErrors: RoleErrorMap = {};
+  const generalErrors: string[] = [];
+
+  if (!profile.llama_server_path?.trim()) {
+    generalErrors.push("未选择 llama-server 可执行文件。可以继续尝试从 PATH 查找；如果启动失败，请先选择 llama-server.exe。");
+  }
+
+  for (const role of roles) {
+    const label = ROLE_META[role].label;
+    const modelPath = modelPathForRole(profile, role).trim();
+    const modelName = roleModel(profile, role).trim();
+    const endpoint = roleEndpoint(profile, role).trim();
+    if (!modelPath) {
+      roleErrors[role] = `${label}缺少 GGUF 文件路径，请展开卡片并点击“浏览”选择模型文件。`;
+      continue;
+    }
+    if (!modelName) {
+      roleErrors[role] = `${label}缺少模型名称。`;
+      continue;
+    }
+    if (!endpoint || !endpointHasUsablePort(endpoint)) {
+      roleErrors[role] = `${label}端口/endpoint 无效，请检查端口号。`;
+    }
+  }
+
+  // 端口不可重复：一个 llama-server 进程只能服务一个角色，向量模型还需独立的 --embedding 服务。
+  const seenTargets = new Map<string, ModelRoleKey>();
+  for (const role of roles) {
+    if (roleErrors[role]) continue;
+    const target = endpointTarget(roleEndpoint(profile, role));
+    if (!target) continue;
+    const previous = seenTargets.get(target);
+    if (previous) {
+      const message = `${ROLE_META[previous].label}与${ROLE_META[role].label}使用了相同的端口（${target}）。每个角色必须使用不同的端口（默认 18001 / 18002 / 18003 / 18004）。`;
+      roleErrors[previous] = roleErrors[previous] ?? message;
+      roleErrors[role] = message;
+    } else {
+      seenTargets.set(target, role);
+    }
+  }
+
+  const firstRole = roles.find((role) => Boolean(roleErrors[role])) ?? null;
+  return {
+    ok: Object.keys(roleErrors).length === 0,
+    roleErrors,
+    generalErrors,
+    firstRole
+  };
+}
+
+function describeAvailabilityError(
+  code: string,
+  message: string,
+  localProfile: LocalModelProfileDto | null
+): string {
+  if (!localProfile) return `${code}: ${message}`;
+  const role = (["chat", "graph", "embed", "rerank"] as const).find((candidate) => {
+    const endpoint = roleEndpoint(localProfile, candidate);
+    return endpoint && message.includes(endpoint);
+  });
+  return role ? `${ROLE_META[role].label}: ${code}: ${message}` : `${code}: ${message}`;
+}
+
+const ROLE_META: Record<
+  ModelRoleKey,
+  { label: string; icon: React.ElementType; color: string; defaultModel: string; defaultPort: string }
+> = {
+  chat: {
+    label: "对话模型",
+    icon: MessageSquare,
+    color: "text-sky-400",
+    defaultModel: "qwen3-14b",
+    defaultPort: "18001"
+  },
+  graph: {
+    label: "图谱模型",
+    icon: Share2,
+    color: "text-violet-400",
+    defaultModel: "qwen3-8b",
+    defaultPort: "18002"
+  },
+  embed: {
+    label: "向量模型",
+    icon: Network,
+    color: "text-emerald-400",
+    defaultModel: "Qwen3-Embedding-4B",
+    defaultPort: "18003"
+  },
+  rerank: {
+    label: "重排模型",
+    icon: ListOrdered,
+    color: "text-amber-400",
+    defaultModel: "bge-reranker-v2-m3",
+    defaultPort: "18004"
+  }
+};
+
+export {
+  type TranslateFn,
+  type ModelRoleKey,
+  type RemoteProtocol,
+  type RemoteApiFormatValue as RemoteApiFormat,
+  type RemoteProviderPreset,
+  type RoleErrorMap,
+  PERFORMANCE_PRESETS,
+  REMOTE_PROTOCOLS,
+  REMOTE_API_FORMATS,
+  REMOTE_PRESET_STORAGE_KEY,
+  REMOTE_PROTOCOL_STORAGE_KEY,
+  REMOTE_API_FORMAT_STORAGE_KEY,
+  applyRemotePreset,
+  parseRemotePresets,
+  normalizeRemoteProtocol,
+  normalizeRemoteApiFormat,
+  normalizeRemoteBaseUrl,
+  buildOpenAiUrl,
+  extractPort,
+  replacePort,
+  pickModelFile,
+  pickLlamaServerFile,
+  fileNameFromPath,
+  dirNameFromPath,
+  modelPathForRole,
+  runtimeStatusForRole,
+  roleEndpoint,
+  roleModel,
+  endpointHasUsablePort,
+  optionalNumber,
+  validateLocalRoles,
+  describeAvailabilityError,
+  ROLE_META,
+};

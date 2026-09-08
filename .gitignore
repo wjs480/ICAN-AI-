@@ -1,0 +1,70 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# Runtime data
+.memori.db
+*.db-shm
+*.db-wal
+.tmp/
+
+# Logs
+*.log
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# UI (Vite/React)
+ui/node_modules/
+ui/dist/
+
+# Local planning scratchpads
+/plan.md
+UI.md
+AI.md
+RELEASE_NOTES_v0.1.0.md
+docs/RELEASE_PREP_NOTES.md
+docs/NEXT_2_WEEKS.zh-CN.md
+docs/CODEX_HANDOFF_2026-03-10.md
+docs/RELEASE_NOTES_v0.2.0.md
+docs/RELEASE_NOTES_v0.3.0.md
+Github_Memory
+
+# Local script runtime artifacts
+scripts/.last-smoke-session.json
+scripts/generate-memory-test-regression-suite.py
+__pycache__/
+*.py[cod]
+
+# Generated QA outputs / temporary locks
+docs/qa/retrieval_regression_metrics.xlsx
+~$*
+**/~$*
+
+# Local diagnostic examples
+memori-core/examples/debug_query.rs
+memori-core/examples/phase2_diagnose.rs
+
+# Local AI assistant settings
+.claude/
+.monkeycode/
+Logo/
+
+# 用户明确要求不入库的计划文档（保留本地，勿提交）
+docs/superpowers/plans/2026-06-05-email-memory-source.md
+
+# Test data
+Memory_Stress_Test
+Memory_Test_V2/target/
+.playwright-mcp
+docs/Other
+
+# v1 语料已退役：untrack 但保留本地，避免重新加入仓库（v2 在 Memory_Test_V2/）
+Memory_Test/doc_*
+Memory_Test/internal_corpus_qa.json
+Memory_Test/generate_test_docs.py
+Memory_Test/eval_results/
+Memory_Test/stress_5000/

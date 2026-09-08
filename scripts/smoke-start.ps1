@@ -1,0 +1,300 @@
+param(
+    [string]$WatchRoot = "",
+    [string]$DbPath = "",
+    [string]$ModelsRoot = "",
+    [string]$UiHost = "127.0.0.1",
+    [int]$UiPort = 1420,
+    [string]$ServerAddr = "127.0.0.1:3757",
+    [string]$ChatEndpoint = "http://localhost:18001",
+    [string]$GraphEndpoint = "http://localhost:18002",
+    [string]$EmbedEndpoint = "http://localhost:18003",
+    [string]$EmbeddingModel = "Qwen3-Embedding-4B",
+    [string]$ChatModel = "qwen3-14b",
+    [string]$GraphModel = "qwen3-8b",
+    [switch]$SkipModelCheck,
+    [switch]$SkipUi,
+    [switch]$SkipDesktop,
+    [ValidateSet("desktop", "server", "both")]
+    [string]$Mode = "desktop"
+)
+
+$ErrorActionPreference = "Stop"
+
+function Write-Info([string]$Message) {
+    Write-Host "[INFO] $Message" -ForegroundColor Cyan
+}
+
+function Write-WarnMsg([string]$Message) {
+    Write-Host "[WARN] $Message" -ForegroundColor Yellow
+}
+
+function Resolve-ShellExe {
+    $pwshCmd = Get-Command pwsh -ErrorAction SilentlyContinue
+    if ($null -ne $pwshCmd) {
+        return $pwshCmd.Source
+    }
+
+    return "powershell.exe"
+}
+
+function Resolve-DesktopRunCommand {
+    & cargo tauri -V *> $null
+    if ($LASTEXITCODE -eq 0) {
+        return "cargo tauri dev"
+    }
+
+    return "cargo run -p memori-desktop"
+}
+
+function Resolve-ServerRunCommand {
+    return "cargo run -p memori-server"
+}
+
+function Get-ListenProcessId([string]$LocalHost, [int]$Port) {
+    $escapedHost = [regex]::Escape($LocalHost)
+    $pattern = ('^\s*TCP\s+{0}:{1}\s+\S+\s+LISTENING\s+(\d+)\s*$' -f $escapedHost, $Port)
+    $rows = netstat -ano | Select-String ":$Port"
+
+    foreach ($row in $rows) {
+        $line = $row.ToString().Trim()
+        if ($line -match $pattern) {
+            return [int]$matches[1]
+        }
+    }
+
+    return $null
+}
+
+function Wait-ForPort([string]$LocalHost, [int]$Port, [int]$TimeoutSec = 45) {
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    do {
+        $listenProcessId = Get-ListenProcessId -LocalHost $LocalHost -Port $Port
+        if ($null -ne $listenProcessId) {
+            return $listenProcessId
+        }
+        Start-Sleep -Milliseconds 500
+    } while ((Get-Date) -lt $deadline)
+
+    return $null
+}
+
+function Get-LlamaCppModels([string]$Endpoint) {
+    $url = $Endpoint.TrimEnd("/") + "/v1/models"
+    try {
+        $response = Invoke-RestMethod -Method Get -Uri $url -TimeoutSec 15
+        if ($null -eq $response.data) {
+            return @()
+        }
+        return @($response.data | ForEach-Object { $_.id } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    }
+    catch {
+        throw "llama.cpp endpoint is not reachable or does not expose /v1/models: $url. $($_.Exception.Message)"
+    }
+}
+
+function Test-LlamaCppEmbedding([string]$Endpoint, [string]$Model) {
+    $url = $Endpoint.TrimEnd("/") + "/v1/embeddings"
+    $body = @{ model = $Model; input = "ping" } | ConvertTo-Json -Depth 4
+    try {
+        $response = Invoke-RestMethod -Method Post -Uri $url -Body $body -ContentType "application/json" -TimeoutSec 20
+        if ($null -eq $response.data -or $response.data.Count -lt 1 -or $null -eq $response.data[0].embedding) {
+            throw "embedding response does not contain data[0].embedding"
+        }
+    }
+    catch {
+        throw "llama.cpp embedding endpoint probe failed: $url. $($_.Exception.Message)"
+    }
+}
+
+function Test-ModelPresent([string[]]$Models, [string]$Expected) {
+    if ([string]::IsNullOrWhiteSpace($Expected)) {
+        return $true
+    }
+    return $Models -contains $Expected
+}
+
+$repoRoot = Split-Path -Parent $PSScriptRoot
+if (-not (Test-Path (Join-Path $repoRoot "Cargo.toml"))) {
+    throw "Cannot find Cargo.toml in repo root. Run this script from <repo>\scripts\smoke-start.ps1."
+}
+
+if ([string]::IsNullOrWhiteSpace($WatchRoot)) {
+    $WatchRoot = Join-Path $repoRoot "target\smoke\watch-root"
+}
+
+if ([string]::IsNullOrWhiteSpace($DbPath)) {
+    $DbPath = Join-Path $repoRoot "target\smoke\memori-smoke.db"
+}
+
+$uiDir = Join-Path $repoRoot "ui"
+if (-not (Test-Path (Join-Path $uiDir "package.json"))) {
+    throw "Cannot find ui/package.json."
+}
+
+if ($DbPath -match "[/\\]") {
+    $dbParent = Split-Path -Parent $DbPath
+    if (-not [string]::IsNullOrWhiteSpace($dbParent)) {
+        New-Item -ItemType Directory -Force $dbParent | Out-Null
+    }
+}
+New-Item -ItemType Directory -Force $WatchRoot | Out-Null
+
+if (-not [string]::IsNullOrWhiteSpace($ModelsRoot) -and -not (Test-Path $ModelsRoot)) {
+    throw "Configured GGUF models directory does not exist: $ModelsRoot"
+}
+
+if (-not [string]::IsNullOrWhiteSpace($ModelsRoot)) {
+    $ModelsRoot = (Resolve-Path $ModelsRoot).Path
+}
+
+Write-Info ("Repo: " + $repoRoot)
+Write-Info ("Watch root: " + $WatchRoot)
+Write-Info ("DB path: " + $DbPath)
+Write-Info ("Mode: " + $Mode)
+Write-Info ("Server addr: " + $ServerAddr)
+Write-Info ("llama.cpp chat endpoint: " + $ChatEndpoint)
+Write-Info ("llama.cpp graph endpoint: " + $GraphEndpoint)
+Write-Info ("llama.cpp embed endpoint: " + $EmbedEndpoint)
+
+if (-not $SkipModelCheck) {
+    if (-not [string]::IsNullOrWhiteSpace($ModelsRoot)) {
+        Write-Info ("GGUF models root: " + $ModelsRoot)
+    }
+    else {
+        Write-WarnMsg "GGUF models root is not set. The script will validate running llama-server endpoints only."
+    }
+
+    $chatModels = Get-LlamaCppModels -Endpoint $ChatEndpoint
+    $graphModels = Get-LlamaCppModels -Endpoint $GraphEndpoint
+    $embedModels = Get-LlamaCppModels -Endpoint $EmbedEndpoint
+    Write-Info ("Chat endpoint models: " + (($chatModels -join ", ") | ForEach-Object { if ($_){$_} else {"<empty>"} }))
+    Write-Info ("Graph endpoint models: " + (($graphModels -join ", ") | ForEach-Object { if ($_){$_} else {"<empty>"} }))
+    Write-Info ("Embed endpoint models: " + (($embedModels -join ", ") | ForEach-Object { if ($_){$_} else {"<empty>"} }))
+
+    if (-not (Test-ModelPresent -Models $chatModels -Expected $ChatModel)) {
+        Write-WarnMsg ("Chat model may be missing from chat endpoint: " + $ChatModel)
+    }
+    if (-not (Test-ModelPresent -Models $graphModels -Expected $GraphModel)) {
+        Write-WarnMsg ("Graph model may be missing from graph endpoint: " + $GraphModel)
+    }
+    if (-not (Test-ModelPresent -Models $embedModels -Expected $EmbeddingModel)) {
+        Write-WarnMsg ("Embedding model may be missing from embed endpoint: " + $EmbeddingModel)
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ModelsRoot)) {
+        $ggufCount = @(Get-ChildItem -LiteralPath $ModelsRoot -Recurse -Filter "*.gguf" -File -ErrorAction SilentlyContinue).Count
+        Write-Info ("GGUF files under models root: " + $ggufCount)
+    }
+    Test-LlamaCppEmbedding -Endpoint $EmbedEndpoint -Model $EmbeddingModel
+}
+else {
+    Write-WarnMsg "Skip model check enabled. UI/server smoke can run without local llama.cpp validation."
+}
+
+$uiPid = $null
+if (-not $SkipUi) {
+    $listenPid = Get-ListenProcessId -LocalHost $UiHost -Port $UiPort
+    if ($null -eq $listenPid) {
+        Write-Info ("Starting UI dev server: http://" + $UiHost + ":" + $UiPort)
+        $uiCmd = "cd /d `"$uiDir`" && pnpm run dev -- --host $UiHost --port $UiPort --strictPort"
+        $uiProc = Start-Process -FilePath "cmd.exe" -ArgumentList "/c", $uiCmd -PassThru
+        $uiPid = $uiProc.Id
+
+        $readyPid = Wait-ForPort -LocalHost $UiHost -Port $UiPort -TimeoutSec 60
+        if ($null -eq $readyPid) {
+            throw "UI startup timeout. Please run pnpm run dev manually in ui folder."
+        }
+        Write-Info ("UI is ready. PID: " + $readyPid)
+    }
+    else {
+        Write-Info ("Port " + $UiPort + " already in use. Reusing existing UI service (PID: " + $listenPid + ").")
+    }
+}
+else {
+    Write-Info "Skip UI startup (-SkipUi)."
+}
+
+$desktopPid = $null
+if (-not $SkipDesktop -and $Mode -in @("desktop", "both")) {
+    Write-Info "Starting Memori Desktop..."
+    $shellExe = Resolve-ShellExe
+    $desktopRunCommand = Resolve-DesktopRunCommand
+    Write-Info ("Desktop command: " + $desktopRunCommand)
+    $desktopScript = @"
+Set-Location '$repoRoot'
+`$env:MEMORI_WATCH_ROOT='$WatchRoot'
+`$env:MEMORI_DB_PATH='$DbPath'
+`$env:MEMORI_MODEL_PROVIDER='llama_cpp_local'
+`$env:MEMORI_CHAT_ENDPOINT='$ChatEndpoint'
+`$env:MEMORI_GRAPH_ENDPOINT='$GraphEndpoint'
+`$env:MEMORI_EMBED_ENDPOINT='$EmbedEndpoint'
+`$env:MEMORI_CHAT_MODEL='$ChatModel'
+`$env:MEMORI_GRAPH_MODEL='$GraphModel'
+`$env:MEMORI_EMBED_MODEL='$EmbeddingModel'
+"@
+    $desktopScript += "`n$desktopRunCommand"
+
+    $desktopProc = Start-Process -FilePath $shellExe `
+        -ArgumentList "-NoExit", "-ExecutionPolicy", "Bypass", "-Command", $desktopScript `
+        -PassThru
+    $desktopPid = $desktopProc.Id
+    Write-Info ("Memori Desktop started with " + $shellExe + ". PID: " + $desktopPid)
+}
+else {
+    Write-Info "Skip desktop startup (-SkipDesktop)."
+}
+
+$serverPid = $null
+if ($Mode -in @("server", "both")) {
+    Write-Info "Starting memori-server..."
+    $shellExe = Resolve-ShellExe
+    $serverRunCommand = Resolve-ServerRunCommand
+    Write-Info ("Server command: " + $serverRunCommand)
+    $serverScript = @"
+Set-Location '$repoRoot'
+`$env:MEMORI_WATCH_ROOT='$WatchRoot'
+`$env:MEMORI_DB_PATH='$DbPath'
+`$env:MEMORI_MODEL_PROVIDER='llama_cpp_local'
+`$env:MEMORI_CHAT_ENDPOINT='$ChatEndpoint'
+`$env:MEMORI_GRAPH_ENDPOINT='$GraphEndpoint'
+`$env:MEMORI_EMBED_ENDPOINT='$EmbedEndpoint'
+`$env:MEMORI_CHAT_MODEL='$ChatModel'
+`$env:MEMORI_GRAPH_MODEL='$GraphModel'
+`$env:MEMORI_EMBED_MODEL='$EmbeddingModel'
+`$env:MEMORI_SERVER_ADDR='$ServerAddr'
+"@
+    $serverScript += "`n$serverRunCommand"
+
+    $serverProc = Start-Process -FilePath $shellExe `
+        -ArgumentList "-NoExit", "-ExecutionPolicy", "Bypass", "-Command", $serverScript `
+        -PassThru
+    $serverPid = $serverProc.Id
+    Write-Info ("memori-server started with " + $shellExe + ". PID: " + $serverPid)
+}
+
+$sessionFile = Join-Path $PSScriptRoot ".last-smoke-session.json"
+$session = @{
+    startedAt = (Get-Date).ToString("s")
+    mode = $Mode
+    uiHost = $UiHost
+    uiPort = $UiPort
+    uiPid = $uiPid
+    desktopPid = $desktopPid
+    serverAddr = $ServerAddr
+    serverPid = $serverPid
+    watchRoot = $WatchRoot
+    dbPath = $DbPath
+    repoRoot = $repoRoot
+}
+$session | ConvertTo-Json | Set-Content -Encoding UTF8 $sessionFile
+
+Write-Host ""
+Write-Host "========================================" -ForegroundColor Green
+Write-Host "Memori-Vault smoke session started" -ForegroundColor Green
+Write-Host ("UI: http://" + $UiHost + ":" + $UiPort) -ForegroundColor Green
+if ($Mode -in @("server", "both")) {
+    Write-Host ("Server: http://" + $ServerAddr) -ForegroundColor Green
+}
+Write-Host ("Watch root: " + $WatchRoot) -ForegroundColor Green
+Write-Host ("DB: " + $DbPath) -ForegroundColor Green
+Write-Host "Stop command: .\scripts\smoke-stop.ps1" -ForegroundColor Green
+Write-Host "========================================" -ForegroundColor Green

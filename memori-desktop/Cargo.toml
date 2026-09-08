@@ -1,0 +1,34 @@
+[package]
+name = "memori-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Memori-Vault Tauri v2 桌面壳层与 IPC 桥接"
+
+[lib]
+name = "memori_desktop_lib"
+crate-type = ["rlib", "cdylib", "staticlib"]
+
+[[bin]]
+name = "memori-desktop"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2.0.5", features = [] }
+
+[dependencies]
+tauri = { version = "2.0.6", features = ["image-png"] }
+tauri-plugin-dialog = "2.4.2"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+tokio = { workspace = true, features = ["sync", "rt", "rt-multi-thread"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tracing-appender.workspace = true
+memori-core = { path = "../memori-core" }
+memori-parser = { path = "../memori-parser" }
+dirs = "6.0.0"
+keyring = "3"
+reqwest = { version = "0.12.23", default-features = false, features = ["json", "rustls-tls"] }
+rusqlite = { version = "0.37.0", features = ["bundled"] }

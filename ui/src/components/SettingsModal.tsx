@@ -1,0 +1,736 @@
+import { AnimatePresence, motion } from "framer-motion";
+import {
+  ArrowRight,
+  Brain,
+  Cpu,
+  Database,
+  LoaderCircle,
+  Network,
+  Palette,
+  Save,
+  ScrollText,
+  Search,
+  Settings
+} from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import type { Language } from "../i18n";
+import { useI18n } from "../i18n";
+import { AnimatedPressButton } from "./MotionKit";
+import { rankSettingsQuery } from "../app/api/desktop";
+import { AdvancedTab, BasicTab, LogsTab, McpTab, MemoryTab, ModelsTab, PersonalizationTab } from "./settings/tabs";
+import type {
+  FontPreset,
+  FontScale,
+  IndexingMode,
+  ModelAvailabilityDto,
+  ModelProvider,
+  ResourceBudget,
+  SettingsModalProps
+} from "./settings/types";
+import type { IndexingActionKey } from "./settings/tabs/AdvancedTab";
+
+type TabKey = "basic" | "models" | "memory" | "mcp" | "advanced" | "personalization" | "logs";
+
+export function SettingsModal({
+  open,
+  onBack,
+  uiLang,
+  aiLang,
+  onUiLangChange,
+  onAiLangChange,
+  watchRoot,
+  isPickingWatchRoot,
+  onPickWatchRoot,
+  retrieveTopK,
+  onRetrieveTopKChange,
+  fontPreset,
+  onFontPresetChange,
+  fontScale,
+  onFontScaleChange,
+  themeMode,
+  onThemeModeChange,
+  modelSettings,
+  enterprisePolicy,
+  modelAvailability,
+  providerModels,
+  modelBusy,
+  enterpriseBusy,
+  onModelSettingsChange,
+  onEnterprisePolicyChange,
+  onSaveModelSettings,
+  onSaveEnterprisePolicy,
+  onProbeModelProvider,
+  onRefreshProviderModels,
+  localModelRuntimeStatuses,
+  localModelRuntimeBusyRole,
+  onRefreshLocalModelRuntimeStatus,
+  onStartLocalModel,
+  onStopLocalModel,
+  onRestartLocalModel,
+  onPickLocalModelsRoot,
+  onClearLocalModelsRoot,
+  indexingMode,
+  resourceBudget,
+  scheduleStart,
+  scheduleEnd,
+  indexingStatus,
+  indexingBusy,
+  onIndexingModeChange,
+  onResourceBudgetChange,
+  onScheduleStartChange,
+  onScheduleEndChange,
+  onSaveIndexingConfig,
+  onTriggerReindex,
+  onPauseIndexing,
+  onResumeIndexing,
+  mcpSettings,
+  mcpStatus,
+  mcpBusy,
+  mcpMessage,
+  onMcpSettingsChange,
+  onSaveMcpSettings,
+  onCopyMcpClientConfig,
+  memorySettings,
+  memoryBusy,
+  memoryMessage,
+  onMemorySettingsChange,
+  onSaveMemorySettings,
+  filterConfig,
+  filterBusy,
+  filterMessage,
+  onFilterConfigChange,
+  onSaveFilterConfig,
+}: SettingsModalProps) {
+  const { t } = useI18n();
+  const [activeTab, setActiveTab] = useState<TabKey>("basic");
+  const [search, setSearch] = useState("");
+  const [aiMatchedKeys, setAiMatchedKeys] = useState<TabKey[] | null>(null);
+  const [autoSyncDaemon, setAutoSyncDaemon] = useState(true);
+  const [graphRagInfer, setGraphRagInfer] = useState(true);
+  type ActionPhase = "idle" | "running" | "success" | "error";
+  const [indexingAction, setIndexingAction] = useState<{
+    key: IndexingActionKey | null;
+    phase: ActionPhase;
+    tick: number;
+  }>({
+    key: null,
+    phase: "idle",
+    tick: 0
+  });
+  const [settingsSaveAction, setSettingsSaveAction] = useState<{
+    tab: TabKey | null;
+    phase: ActionPhase;
+    tick: number;
+  }>({
+    tab: null,
+    phase: "idle",
+    tick: 0
+  });
+
+
+  const tabMeta = useMemo(
+    () => [
+      {
+        key: "basic" as const,
+        label: t("basic"),
+        icon: Cpu,
+        keywords: [
+          t("uiLanguage"),
+          t("aiReplyLanguage"),
+          t("watchRoot"),
+          t("topK"),
+          t("filter"),
+          t("fileFilter"),
+          t("includeExtensions"),
+          t("excludeExtensions"),
+          t("excludePaths"),
+          t("includePaths"),
+          t("minDate"),
+          t("maxDate"),
+          t("minSize"),
+          t("maxSize"),
+          "文件类型",
+          "读取文件夹",
+          "不读取文件夹",
+          "日期筛选",
+          "大小筛选"
+        ]
+      },
+      {
+        key: "models" as const,
+        label: t("models"),
+        icon: Settings,
+        keywords: [t("modelProvider"), t("chatModel"), t("graphModel"), t("embedModel")]
+      },
+      {
+        key: "memory" as const,
+        label: t("memory"),
+        icon: Brain,
+        keywords: [
+          t("conversationMemory"),
+          t("autoMemoryWrite"),
+          t("contextBudget"),
+          t("memoryWriteSource"),
+          "STM",
+          "MTM",
+          "LTM"
+        ]
+      },
+      {
+        key: "mcp" as const,
+        label: t("mcp"),
+        icon: Network,
+        keywords: [t("mcpTransport"), t("mcpEndpoint"), t("mcpClientConfig"), "MCP", t("memory")]
+      },
+      {
+        key: "advanced" as const,
+        label: t("advanced"),
+        icon: Database,
+        keywords: [
+          t("indexingMode"),
+          t("resourceBudget"),
+          t("triggerReindex"),
+          t("pauseIndexing"),
+          t("resumeIndexing")
+        ]
+      },
+      {
+        key: "personalization" as const,
+        label: t("personalization"),
+        icon: Palette,
+        keywords: [t("fontPreset"), t("fontSize"), t("themeToggle")]
+      },
+      {
+        key: "logs" as const,
+        label: "日志",
+        icon: ScrollText,
+        keywords: ["日志", "log", "debug", "错误"]
+      }
+    ],
+    [t]
+  );
+
+  const localFilteredTabs = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return tabMeta;
+    return tabMeta.filter((tab) =>
+      [tab.label, ...tab.keywords].some((item) => item.toLowerCase().includes(q))
+    );
+  }, [search, tabMeta]);
+
+  useEffect(() => {
+    const query = search.trim();
+    if (!query) {
+      setAiMatchedKeys(null);
+      return;
+    }
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      const candidates = tabMeta.map((tab) => ({
+        key: tab.key,
+        text: `${tab.label} ${tab.keywords.join(" ")}`
+      }));
+      void rankSettingsQuery({ query, candidates, lang: uiLang })
+        .then((keys) => {
+          if (cancelled) return;
+          const valid = keys.filter((key): key is TabKey => tabMeta.some((tab) => tab.key === key));
+          setAiMatchedKeys(valid.length > 0 ? valid : null);
+        })
+        .catch(() => {
+          if (!cancelled) setAiMatchedKeys(null);
+        });
+    }, 280);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [search, tabMeta, uiLang]);
+
+  const filteredTabs = useMemo(() => {
+    if (!search.trim()) return tabMeta;
+    if (aiMatchedKeys && aiMatchedKeys.length > 0) {
+      const map = new Map(tabMeta.map((tab) => [tab.key, tab] as const));
+      return aiMatchedKeys
+        .map((key) => map.get(key))
+        .filter((tab): tab is (typeof tabMeta)[number] => Boolean(tab));
+    }
+    return localFilteredTabs;
+  }, [aiMatchedKeys, localFilteredTabs, search, tabMeta]);
+
+  useEffect(() => {
+    if (filteredTabs.length === 0) return;
+    if (!filteredTabs.some((tab) => tab.key === activeTab)) {
+      setActiveTab(filteredTabs[0].key);
+    }
+  }, [activeTab, filteredTabs]);
+
+
+  const fontPresetOptions = [
+    { value: "system" as const, label: t("fontPresetSystem") },
+    { value: "neo" as const, label: t("fontPresetNeo") },
+    { value: "mono" as const, label: t("fontPresetMono") }
+  ];
+  const fontScaleOptions = [
+    { value: "s" as const, label: t("fontSizeS") },
+    { value: "m" as const, label: t("fontSizeM") },
+    { value: "l" as const, label: t("fontSizeL") }
+  ];
+
+  const onIndexingAction = async (key: IndexingActionKey, action: () => Promise<void>) => {
+    setIndexingAction((prev) => ({ key, phase: "running", tick: prev.tick + 1 }));
+    try {
+      await action();
+      setIndexingAction((prev) => ({ key, phase: "success", tick: prev.tick + 1 }));
+      window.setTimeout(() => {
+        setIndexingAction((prev) => ({ key: prev.key, phase: "idle", tick: prev.tick + 1 }));
+      }, 1800);
+    } catch {
+      setIndexingAction((prev) => ({ key, phase: "error", tick: prev.tick + 1 }));
+      window.setTimeout(() => {
+        setIndexingAction((prev) => ({ key: prev.key, phase: "idle", tick: prev.tick + 1 }));
+      }, 2200);
+    }
+  };
+
+  const stableActionButtonClass =
+    "inline-flex h-9 w-[170px] items-center justify-center gap-1.5 rounded-md px-3 text-sm whitespace-nowrap transition disabled:opacity-60";
+
+  const onProviderSwitch = (provider: ModelProvider) => {
+    onModelSettingsChange({
+      ...modelSettings,
+      active_provider: provider
+    });
+  };
+
+  const indexingModelBlocked = useMemo(() => {
+    const embedRuntime = localModelRuntimeStatuses?.roles.find((role) => role.role === "embed");
+    const embedRuntimeState = embedRuntime?.state?.toLowerCase() ?? "unknown";
+    if (embedRuntimeState === "running" || embedRuntimeState === "external") {
+      return false;
+    }
+    const phase = indexingStatus?.phase?.toLowerCase() ?? "idle";
+    if (["scanning", "embedding", "graphing"].includes(phase)) {
+      return false;
+    }
+    const text = `${indexingStatus?.last_error ?? ""} ${indexingStatus?.rebuild_reason ?? ""}`.toLowerCase();
+    return [
+      "embedding request failed",
+      "connection refused",
+      "actively refused",
+      "failed to connect",
+      "error sending request",
+      "timed out",
+      "timeout",
+      "tcp connect error",
+      "connectex",
+      "向量模型未启动",
+      "端口不可连接"
+    ].some((pattern) => text.includes(pattern));
+  }, [indexingStatus?.last_error, indexingStatus?.phase, indexingStatus?.rebuild_reason, localModelRuntimeStatuses]);
+
+  const indexingPhaseLabel = useMemo(() => {
+    if (indexingModelBlocked) {
+      return uiLang === "zh-CN" ? "等待模型启动" : "Waiting for model";
+    }
+    const normalized = indexingStatus?.phase?.toLowerCase() ?? "idle";
+    const rebuildState = (indexingStatus?.rebuild_state ?? "ready").toLowerCase();
+    const retryableFilesRemaining = Boolean(indexingStatus?.rebuild_reason?.includes("retryable_files_remaining"));
+    const hasIndexedDocs = (indexingStatus?.indexed_docs ?? 0) > 0;
+    const hasIndexedChunks = (indexingStatus?.indexed_chunks ?? 0) > 0;
+    const hasIndexedGraph = (indexingStatus?.graphed_chunks ?? 0) > 0;
+    const hasSearchableIndex = hasIndexedDocs || hasIndexedChunks || hasIndexedGraph;
+    const searchReady =
+      ((rebuildState === "ready" && hasSearchableIndex) || (retryableFilesRemaining && hasIndexedChunks)) &&
+      !indexingModelBlocked;
+    const graphBacklog = indexingStatus?.graph_backlog ?? 0;
+    if (searchReady && (normalized === "graphing" || graphBacklog > 0)) {
+      return t("indexingPhaseOptimizing");
+    }
+    if (normalized === "scanning") return t("indexingPhaseScanning");
+    if (normalized === "embedding") return t("indexingPhaseEmbedding");
+    if (normalized === "graphing") return t("indexingPhaseGraphing");
+    return t("indexingPhaseIdle");
+  }, [
+    indexingModelBlocked,
+    indexingStatus?.graph_backlog,
+    indexingStatus?.graphed_chunks,
+    indexingStatus?.indexed_chunks,
+    indexingStatus?.indexed_docs,
+    indexingStatus?.phase,
+    indexingStatus?.rebuild_reason,
+    indexingStatus?.rebuild_state,
+    t,
+    uiLang
+  ]);
+
+  const indexingRebuildLabel = useMemo(() => {
+    if (indexingModelBlocked) {
+      return uiLang === "zh-CN" ? "等待模型" : "Waiting for model";
+    }
+    const normalized = indexingStatus?.rebuild_state?.toLowerCase() ?? "ready";
+    if (normalized === "required") return t("indexingRebuildRequired");
+    if (normalized === "rebuilding") return t("indexingRebuildInProgress");
+    return t("indexingRebuildReady");
+  }, [indexingModelBlocked, indexingStatus?.rebuild_state, t, uiLang]);
+
+  const lastScanLabel = useMemo(() => {
+    const ts = indexingStatus?.last_scan_at;
+    if (!ts) {
+      return t("indexingNever");
+    }
+    try {
+      return new Date(ts * 1000).toLocaleString(uiLang === "zh-CN" ? "zh-CN" : "en-US");
+    } catch {
+      return String(ts);
+    }
+  }, [indexingStatus?.last_scan_at, t, uiLang]);
+
+  const etaLabel = useMemo(() => {
+    if (indexingModelBlocked) {
+      return uiLang === "zh-CN" ? "等待模型启动后继续" : "Waiting for model";
+    }
+    const phase = indexingStatus?.phase ?? "idle";
+    const normalizedPhase = phase.toLowerCase();
+    const rebuildState = (indexingStatus?.rebuild_state ?? "ready").toLowerCase();
+    const hasError = Boolean(indexingStatus?.last_error?.trim());
+    if (normalizedPhase === "idle" || normalizedPhase === "ready") {
+      if (rebuildState === "required") {
+        return uiLang === "zh-CN" ? "等待重试" : "Waiting to retry";
+      }
+      if (rebuildState === "rebuilding") {
+        return uiLang === "zh-CN" ? "重建中" : "Rebuilding";
+      }
+      if (hasError) {
+        return uiLang === "zh-CN" ? "已暂停，需处理错误" : "Paused, fix error";
+      }
+      return uiLang === "zh-CN" ? "已完成" : "Done";
+    }
+    const perDocSec = resourceBudget === "fast" ? 0.3 : resourceBudget === "balanced" ? 0.6 : 1.0;
+    const perChunkEmbedSec = resourceBudget === "fast" ? 0.5 : resourceBudget === "balanced" ? 1.0 : 2.0;
+    const perChunkGraphSec = resourceBudget === "fast" ? 0.35 : resourceBudget === "balanced" ? 0.8 : 1.4;
+    let totalSec = 0;
+    if (phase === "scanning") {
+      const remaining = Math.max(0, (indexingStatus?.total_docs ?? 0) - (indexingStatus?.indexed_docs ?? 0));
+      totalSec = remaining * perDocSec;
+    } else if (phase === "embedding") {
+      const remaining = Math.max(0, (indexingStatus?.total_chunks ?? 0) - (indexingStatus?.indexed_chunks ?? 0));
+      totalSec = remaining * perChunkEmbedSec;
+    } else if (phase === "graphing") {
+      const backlog = Math.max(0, indexingStatus?.graph_backlog ?? 0);
+      totalSec = backlog * perChunkGraphSec;
+    }
+    if (totalSec < 60) {
+      return uiLang === "zh-CN" ? `约 ${Math.ceil(totalSec)} 秒` : `~${Math.ceil(totalSec)}s`;
+    }
+    const minutes = Math.ceil(totalSec / 60);
+    return uiLang === "zh-CN" ? `约 ${minutes} 分钟` : `~${minutes} min`;
+  }, [indexingModelBlocked, indexingStatus, resourceBudget, uiLang]);
+
+  const indexingButtonClass = (key: IndexingActionKey) => {
+    if (indexingAction.key !== key) {
+      return "bg-transparent text-[var(--text-primary)] hover:bg-[var(--accent-soft)] hover:text-[var(--accent)]";
+    }
+    if (indexingAction.phase === "success") {
+      return "bg-[var(--accent-soft)] text-[var(--accent)] shadow-[0_0_8px_rgba(88,166,255,0.2)]";
+    }
+    if (indexingAction.phase === "error") {
+      return "bg-red-500/15 text-red-300 shadow-[0_0_14px_rgba(239,68,68,0.3)]";
+    }
+    if (indexingAction.phase === "running") {
+      return "bg-[var(--accent-soft)] text-[var(--accent)]";
+    }
+    return "bg-transparent text-[var(--text-primary)] hover:bg-[var(--accent-soft)] hover:text-[var(--accent)]";
+  };
+
+  const saveTarget = useMemo(() => {
+    switch (activeTab) {
+      case "basic":
+        return {
+          label: uiLang === "zh-CN" ? "保存基础设置" : "Save Basics",
+          busy: filterBusy,
+          disabled: false,
+          action: onSaveFilterConfig
+        };
+      case "models":
+        return {
+          label: uiLang === "zh-CN" ? "保存配置" : "Save Config",
+          busy: modelBusy,
+          disabled: false,
+          action: onSaveModelSettings
+        };
+      case "advanced":
+        return {
+          label: uiLang === "zh-CN" ? "保存索引策略" : "Save Indexing",
+          busy: indexingBusy,
+          disabled: false,
+          action: onSaveIndexingConfig
+        };
+      case "mcp":
+        return {
+          label: t("mcpSave"),
+          busy: mcpBusy,
+          disabled: false,
+          action: onSaveMcpSettings
+        };
+      case "memory":
+        return {
+          label: t("saveMemorySettings"),
+          busy: memoryBusy,
+          disabled: false,
+          action: onSaveMemorySettings
+        };
+      default:
+        return {
+          label: uiLang === "zh-CN" ? "无需保存" : "No Save Needed",
+          busy: false,
+          disabled: true,
+          action: async () => {}
+        };
+    }
+  }, [
+    activeTab,
+    filterBusy,
+    indexingBusy,
+    mcpBusy,
+    memoryBusy,
+    modelBusy,
+    onSaveFilterConfig,
+    onSaveIndexingConfig,
+    onSaveMcpSettings,
+    onSaveMemorySettings,
+    onSaveModelSettings,
+    t,
+    uiLang
+  ]);
+
+  const runActiveSave = async () => {
+    if (saveTarget.disabled || saveTarget.busy) return;
+    setSettingsSaveAction((prev) => ({ tab: activeTab, phase: "running", tick: prev.tick + 1 }));
+    try {
+      await saveTarget.action();
+      setSettingsSaveAction((prev) => ({ tab: activeTab, phase: "success", tick: prev.tick + 1 }));
+      window.setTimeout(() => {
+        setSettingsSaveAction((prev) => ({ tab: prev.tab, phase: "idle", tick: prev.tick + 1 }));
+      }, 1600);
+    } catch {
+      setSettingsSaveAction((prev) => ({ tab: activeTab, phase: "error", tick: prev.tick + 1 }));
+      window.setTimeout(() => {
+        setSettingsSaveAction((prev) => ({ tab: prev.tab, phase: "idle", tick: prev.tick + 1 }));
+      }, 2200);
+    }
+  };
+
+  const topSaveBusy =
+    saveTarget.busy || (settingsSaveAction.tab === activeTab && settingsSaveAction.phase === "running");
+  const topSaveError = settingsSaveAction.tab === activeTab && settingsSaveAction.phase === "error";
+
+  return (
+    <motion.aside
+      initial={{ x: 140, opacity: 0 }}
+      animate={{ x: 0, opacity: 1 }}
+      exit={{ x: 140, opacity: 0 }}
+      transition={{ type: "spring", damping: 26, stiffness: 300 }}
+      className="settings-shell pointer-events-auto h-full w-[78%] overflow-hidden shadow-[-24px_0_44px_-26px_rgba(0,0,0,0.48),24px_0_44px_-26px_rgba(0,0,0,0.24)]"
+      data-open={open}
+      onClick={(event) => event.stopPropagation()}
+    >
+      <div className="flex h-11 items-center justify-between px-4 shadow-[0_10px_18px_-16px_rgba(88,166,255,0.25)]">
+        <AnimatedPressButton
+          type="button"
+          onClick={onBack}
+          className="inline-flex items-center gap-1.5 text-[var(--text-secondary)] transition hover:text-[var(--text-primary)]"
+          aria-label={t("back")}
+          title={t("back")}
+        >
+          <ArrowRight className="h-4 w-4" />
+          <span className="text-xs tracking-[0.1em] uppercase">{t("back")}</span>
+        </AnimatedPressButton>
+        <span className="text-xs tracking-[0.16em] text-[var(--text-secondary)] uppercase">
+          {t("settingsTitle")}
+        </span>
+      </div>
+
+      <div className="flex h-[calc(100%-44px)] min-h-0">
+        <aside className="settings-rail h-full w-[28%] p-3 shadow-[10px_0_18px_-16px_rgba(88,166,255,0.28)]">
+          <div className="mb-3 px-2 pt-1 text-xs tracking-[0.16em] text-[var(--text-secondary)] uppercase">
+            {t("settings")}
+          </div>
+          <div className="relative mb-3">
+            <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[var(--text-muted)]" />
+            <input
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              placeholder={t("settingsSearchPlaceholder")}
+              className="h-9 w-full rounded-md border-none bg-transparent pl-8 pr-2 text-sm text-[var(--text-primary)] outline-none placeholder:text-[var(--text-muted)] focus:ring-0"
+            />
+          </div>
+          {filteredTabs.length === 0 ? (
+            <div className="rounded-lg border border-[var(--line-soft)] bg-[var(--bg-surface-2)] px-3 py-2 text-xs text-[var(--text-secondary)] shadow-[0_8px_22px_-18px_rgba(88,166,255,0.24)]">
+              {t("noSettingsMatch")}
+            </div>
+          ) : (
+            <div className="space-y-1">
+              {filteredTabs.map((tab) => {
+                const Icon = tab.icon;
+                const active = activeTab === tab.key;
+                return (
+                  <AnimatedPressButton
+                    key={tab.key}
+                    type="button"
+                    onClick={() => setActiveTab(tab.key)}
+                    className={`relative flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm transition-colors ${
+                      active ? "text-[var(--accent)]" : "text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+                    }`}
+                  >
+                    {active ? (
+                      <motion.span
+                        layoutId="settings-tab-active-indicator"
+                        className="absolute left-0 h-4 w-[2px] rounded bg-[var(--accent)]"
+                        transition={{ type: "spring", stiffness: 420, damping: 34, mass: 0.62 }}
+                      />
+                    ) : null}
+                    <Icon className="h-4 w-4" />
+                    <span>{tab.label}</span>
+                  </AnimatedPressButton>
+                );
+              })}
+            </div>
+          )}
+        </aside>
+
+        <section className="settings-content settings-panel-solid settings-scrollbar relative min-h-0 w-[72%] overflow-y-auto px-5 py-5">
+          <div className="sticky top-0 z-20 mb-[-42px] flex h-10 justify-end pointer-events-none">
+            <AnimatedPressButton
+              type="button"
+              onClick={() => void runActiveSave()}
+              disabled={saveTarget.disabled || topSaveBusy}
+              className={`pointer-events-auto inline-flex h-10 items-center gap-2 rounded-lg px-4 text-sm font-medium text-white shadow-sm transition hover:opacity-90 disabled:opacity-50 ${
+                topSaveError ? "bg-red-500" : "bg-[var(--accent)]"
+              }`}
+              title={saveTarget.label}
+            >
+              {topSaveBusy ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+              {saveTarget.label}
+            </AnimatedPressButton>
+          </div>
+          <AnimatePresence mode="wait">
+            {activeTab === "basic" ? (
+              <BasicTab
+                t={t}
+                uiLang={uiLang}
+                aiLang={aiLang}
+                onUiLangChange={onUiLangChange}
+                onAiLangChange={onAiLangChange}
+                retrieveTopK={retrieveTopK}
+                onRetrieveTopKChange={onRetrieveTopKChange}
+                watchRoot={watchRoot}
+                isPickingWatchRoot={isPickingWatchRoot}
+                onPickWatchRoot={onPickWatchRoot}
+                autoSyncDaemon={autoSyncDaemon}
+                onAutoSyncDaemonChange={setAutoSyncDaemon}
+                graphRagInfer={graphRagInfer}
+                onGraphRagInferChange={setGraphRagInfer}
+                filterConfig={filterConfig}
+                filterBusy={filterBusy}
+                filterMessage={filterMessage}
+                onFilterConfigChange={onFilterConfigChange}
+                onSaveFilterConfig={onSaveFilterConfig}
+              />
+            ) : null}
+
+                        {activeTab === "models" ? (
+              <ModelsTab
+                t={t}
+                modelSettings={modelSettings}
+                modelAvailability={modelAvailability}
+                providerModels={providerModels}
+                modelBusy={modelBusy}
+                onProviderSwitch={onProviderSwitch}
+                onModelSettingsChange={onModelSettingsChange}
+                onProbeModelProvider={onProbeModelProvider}
+                onRefreshProviderModels={onRefreshProviderModels}
+                localModelRuntimeStatuses={localModelRuntimeStatuses}
+                localModelRuntimeBusyRole={localModelRuntimeBusyRole}
+                onRefreshLocalModelRuntimeStatus={onRefreshLocalModelRuntimeStatus}
+                onStartLocalModel={onStartLocalModel}
+                onStopLocalModel={onStopLocalModel}
+                onRestartLocalModel={onRestartLocalModel}
+                onPickLocalModelsRoot={onPickLocalModelsRoot}
+                onClearLocalModelsRoot={onClearLocalModelsRoot}
+              />
+            ) : null}
+
+                        {activeTab === "advanced" ? (
+              <AdvancedTab
+                t={t}
+                uiLang={uiLang}
+                indexingMode={indexingMode}
+                onIndexingModeChange={onIndexingModeChange}
+                resourceBudget={resourceBudget}
+                onResourceBudgetChange={onResourceBudgetChange}
+                scheduleStart={scheduleStart}
+                scheduleEnd={scheduleEnd}
+                onScheduleStartChange={onScheduleStartChange}
+                onScheduleEndChange={onScheduleEndChange}
+                indexingStatus={indexingStatus}
+                localModelRuntimeStatuses={localModelRuntimeStatuses}
+                indexingBusy={indexingBusy}
+                indexingPhaseLabel={indexingPhaseLabel}
+                indexingRebuildLabel={indexingRebuildLabel}
+                lastScanLabel={lastScanLabel}
+                etaLabel={etaLabel}
+                indexingModelBlocked={indexingModelBlocked}
+                stableActionButtonClass={stableActionButtonClass}
+                indexingButtonClass={indexingButtonClass}
+                indexingAction={indexingAction}
+                onIndexingAction={onIndexingAction}
+                onTriggerReindex={onTriggerReindex}
+                onPauseIndexing={onPauseIndexing}
+                onResumeIndexing={onResumeIndexing}
+              />
+            ) : null}
+
+                        {activeTab === "mcp" ? (
+              <McpTab
+                t={t}
+                mcpSettings={mcpSettings}
+                mcpStatus={mcpStatus}
+                mcpBusy={mcpBusy}
+                mcpMessage={mcpMessage}
+                onMcpSettingsChange={onMcpSettingsChange}
+                onCopyMcpClientConfig={onCopyMcpClientConfig}
+              />
+            ) : null}
+
+                        {activeTab === "memory" ? (
+              <MemoryTab
+                t={t}
+                memorySettings={memorySettings}
+                memoryBusy={memoryBusy}
+                memoryMessage={memoryMessage}
+                onMemorySettingsChange={onMemorySettingsChange}
+              />
+            ) : null}
+
+                        {activeTab === "personalization" ? (
+              <PersonalizationTab
+                t={t}
+                fontPreset={fontPreset}
+                onFontPresetChange={onFontPresetChange}
+                fontScale={fontScale}
+                onFontScaleChange={onFontScaleChange}
+                themeMode={themeMode}
+                onThemeModeChange={onThemeModeChange}
+                fontPresetOptions={fontPresetOptions}
+                fontScaleOptions={fontScaleOptions}
+              />
+            ) : null}
+
+            {activeTab === "logs" ? <LogsTab /> : null}
+          </AnimatePresence>
+        </section>
+      </div>
+    </motion.aside>
+  );
+}
